@@ -289,6 +289,8 @@ settings(){const st=S.profile.settings;return `<h1>Settings</h1>
   <label class="stack"><span class="label">Barbell weight for the plate calculator</span><select class="field" id="setBar" data-setting="bar">${[20,15,10,7].map(v=>`<option value="${v}" ${+st.bar===v?'selected':''}>${v} kg</option>`).join('')}</select></label></section>
   <section class="panel"><h3>Bring your Hevy data</h3><p class="muted small">In Hevy, open Profile, Settings, Export &amp; Import Data, then Export Workouts. Choose that CSV here. Importing the same file twice skips workouts you already have.</p>
   <div class="btn primary file">Import Hevy CSV<input id="hevyFile" type="file" accept=".csv,text/csv" data-file="hevy" aria-label="Import Hevy CSV"></div></section>
+  <section class="panel"><h3>Import a program</h3><p class="muted small">Add routines from a CSV with one row per set. A routine with the same program and name is replaced. Your workout history isn't touched.</p>
+  <div class="btn file">Import program CSV<input id="programFile" type="file" accept=".csv,text/csv" data-file="program" aria-label="Import program CSV"></div></section>
   <section class="panel"><h3>Backup</h3><p class="muted small">${syncText()}</p>
   <div class="row"><button class="btn grow" data-act="exportJson">Export backup</button><button class="btn grow" data-act="exportCsv">Export CSV</button></div>
   <div class="btn file">Restore a backup<input id="restoreFile" type="file" accept=".json,application/json" data-file="restore" aria-label="Restore backup"></div></section>`}
@@ -568,7 +570,7 @@ document.addEventListener('input',e=>{
 document.addEventListener('change',e=>{
   const t=e.target,d=t.dataset;
   if(d.setting){S.profile.settings[d.setting]=d.setting==='unit'?t.value:+t.value;saveProfile();render()}
-  if(d.file&&t.files[0]){const r=new FileReader();r.onload=()=>{d.file==='hevy'?importHevy(String(r.result)):restore(String(r.result));t.value=''};r.onerror=()=>toast('That file could not be read. Try choosing it again.');r.readAsText(t.files[0])}
+  if(d.file&&t.files[0]){const r=new FileReader();r.onload=()=>{({hevy:importHevy,program:importProgram,restore})[d.file](String(r.result));t.value=''};r.onerror=()=>toast('That file could not be read. Try choosing it again.');r.readAsText(t.files[0])}
 });
 
 /* ---------- import / export ---------- */
@@ -619,6 +621,37 @@ function importHevy(txt){
     if(p.newEx.size)saveProfile();
     fresh.forEach(w=>{S.workouts[w.id]=w});histMemo=null;cache();
     tab='history';screens=[];render();scrollTo(0,0);toast(`Imported ${fresh.length} workouts.`);
+  });
+}
+function parseProgram(txt){
+  const rows=parseCsv(txt);if(rows.length<2)return null;
+  const hd=rows[0].map(x=>x.trim().toLowerCase()),col=n=>hd.indexOf(n);
+  if(col('routine')<0||col('exercise')<0)return null;
+  const typeMap={normal:'n',warmup:'w',dropset:'d',failure:'f'},num=v=>{const n=parseFloat(v);return isNaN(n)||n<0?'':n};
+  const routines=new Map(),newEx=new Map();let skipped=0;
+  rows.slice(1).forEach(r=>{
+    const g=n=>col(n)<0?'':String(r[col(n)]??'').trim(),routine=g('routine'),raw=g('exercise');
+    if(!routine||!raw){skipped++;return}
+    const program=g('program'),key=program+'|'+routine;
+    if(!routines.has(key))routines.set(key,{id:uid(),name:routine,program,exercises:[]});
+    const known=allEx().find(e=>e.name.toLowerCase()===raw.toLowerCase()),ex=known?known.name:raw,R=routines.get(key);
+    let x=R.exercises[R.exercises.length-1];
+    if(!x||x.ex!==ex){x={ex,notes:'',sets:[]};R.exercises.push(x)}
+    if(g('notes')&&!x.notes)x.notes=g('notes');
+    const s={type:typeMap[g('set_type').toLowerCase()]||'n'},w=num(g('weight_kg')),reps=num(g('reps')),t=num(g('duration_seconds')),d=num(g('distance_km'));
+    if(w!=='')s.w=w;if(reps!=='')s.r=reps;if(t!=='')s.t=t;if(d!=='')s.d=d;x.sets.push(s);
+    if(!known&&![...newEx.keys()].some(n=>n.toLowerCase()===raw.toLowerCase()))newEx.set(raw,d!==''?'cardio':t!==''?'time':'weight');
+  });
+  return{routines:[...routines.values()],newEx,skipped};
+}
+function importProgram(txt){
+  const p=parseProgram(txt);
+  if(!p||!p.routines.length)return ask('That doesn’t look like a program file','It needs a header row with at least routine and exercise columns, and one row per set.','OK',null);
+  const same=r=>o=>o.name===r.name&&(o.program||'')===r.program,replaced=p.routines.filter(r=>S.profile.routines.some(same(r))).length,sets=p.routines.reduce((n,r)=>n+r.exercises.reduce((a,x)=>a+x.sets.length,0),0);
+  ask(`Import ${p.routines.length} routine${p.routines.length>1?'s':''}?`,`${p.routines.map(r=>r.name).join(', ')}. ${sets} sets.${replaced?` ${replaced} existing routine${replaced>1?'s':''} will be replaced.`:''}${p.newEx.size?` Not in the exercise library, so these will be added as custom: ${[...p.newEx.keys()].join(', ')}.`:''}${p.skipped?` ${p.skipped} incomplete rows skipped.`:''}`,'Import',()=>{
+    p.newEx.forEach((type,name)=>S.profile.customExercises.push({name,muscle:type==='cardio'?'Cardio':'Other',type}));
+    p.routines.forEach(r=>{const i=S.profile.routines.findIndex(same(r));if(i<0)S.profile.routines.push(r);else{r.id=S.profile.routines[i].id;S.profile.routines[i]=r}});
+    saveProfile();tab='train';screens=[];render();scrollTo(0,0);toast('Program imported.');
   });
 }
 function restore(txt){
